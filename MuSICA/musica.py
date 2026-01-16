@@ -1,9 +1,10 @@
 import machine, time
 import math
 
-# ------------------------------
 # CONFIG
-# ------------------------------
+
+DEBUG = 1
+
 SAMPLE_RATE = 22050 
 BUFFER = 512
 TICK_RATE = 50       
@@ -21,11 +22,15 @@ i2s = machine.I2S(
     ibuf=2048
 )
 
- # ------------------------------
+# console log function
 
-# FREQ TABLE AND LUT FOR SINE
+def c_log(txt: str):
+    if DEBUG>0:
+        print(txt)
 
-# ------------------------------
+# Frequenct table by RealClearwave
+# https://github.com/echo-lalia/MicroHydra-Apps/tree/main/app-source/mmlPlay
+# also LUT for sine
 
 FREQ_TABLE = {
     'C':  [16.35, 32.70, 65.41, 130.81, 261.63, 523.25, 1046.50, 2093.00],
@@ -67,112 +72,107 @@ WAVE_MAP = {0: gen_square, 1: gen_saw, 2: gen_tri, 3: gen_noise, 4: gen_sine}
 # parser
 
 def parse_to_ticks(mml):
-    print("Got mml string: "+mml)
+    c_log("MML: "+ mml)
     tempo, octave, length, vol, wave = 140, 4, 4, 32, 0
     ticks = []
     
-    FLAT_MAP = {
-        'C-': ('B', -1), 'D-': ('C#', 0), 'E-': ('D#', 0),
-        'F-': ('E', 0), 'G-': ('F#', 0), 'A-': ('G#', 0),
-        'B-': ('A#', 0)
-    }
-    
-    def add_event(f, v, w, dur_ms):
-        # ! Using round instead of int to avoid timing issues
-        num_ticks = max(1, round((dur_ms / 1000) * TICK_RATE))
-        for _ in range(num_ticks):
-            # For the purpose of future chord implementation
-            ticks.append(([f], v / 64.0, w))
+    FLAT_MAP = {'C-': ('B', -1), 'D-': ('C#', 0), 'E-': ('D#', 0), 'F-': ('E', 0), 'G-': ('F#', 0), 'A-': ('G#', 0), 'B-': ('A#', 0)}
+
+    def get_note_freq(n_char, m_mod, cur_oct):
+        n_char = n_char.upper()
+        t_note = n_char
+        t_oct = cur_oct
+        if m_mod in "+#":
+            if n_char == 'E': t_note = 'F'
+            elif n_char == 'B': t_note = 'C'; t_oct += 1
+            else: t_note = n_char + "#"
+        elif m_mod == "-":
+            res = FLAT_MAP.get(n_char + "-")
+            if res: t_note, off = res; t_oct += off
+        return FREQ_TABLE.get(t_note, [0]*8)[max(0, min(7, t_oct))]
 
     i = 0
     while i < len(mml):
         ch = mml[i].lower()
-        
         if ch.isspace():
             i += 1
             continue
 
-        if ch in "cdefgab":
-            note = ch.upper()
-            print("Found note: "+note)
-            i += 1
+        if ch in "cdefgab" or ch == "[":
+            chord_freqs = []
+            is_chord = (ch == "[")
             
-            modifier = "" # do we even need this? see below
-            if i < len(mml) and mml[i] in "+#-":
-                modifier = mml[i]
-                print("Found modifier: "+modifier)
+            if is_chord:
+                c_log("Found chord")
                 i += 1
+                while i < len(mml) and mml[i] != "]":
+                    if mml[i].lower() in "cdefgab":
+                        n = mml[i]; i += 1
+                        m = "!" # This is hack :D Well, micropython is stubborn and keeps the value if trying to set it to empty string.
+                        if i < len(mml) and mml[i] in "+#-":
+                            m = mml[i]; i += 1
+                            c_log("Found chord modifier: "+ m)
+                        chord_freqs.append(get_note_freq(n, m, octave))
+                    else: i += 1
+                if i < len(mml) and mml[i] == "]": i += 1
             else:
-                modifier = "!" # This is hack :D Well, micropython is stubborn and keeps the value if trying to set it to empty string.
-            
-            current_note_dur = length
-            if i < len(mml) and mml[i].isdigit():
-                num_str = ""
-                while i < len(mml) and mml[i].isdigit():
-                    num_str += mml[i]
-                    i += 1
-                print("Found rhythmic value of "+num_str)
-                current_note_dur = int(num_str)
-            
-            current_octave = octave
-            note_to_find = note
-            
-            if modifier in "+#":
-                if note == 'E': note_to_find = 'F'
-                elif note == 'B': 
-                    note_to_find = 'C'
-                    current_octave += 1
-                else: note_to_find = note + "#"
-            elif modifier == "-":
-                note_to_find, octave_offset = FLAT_MAP[note + "-"]
-                current_octave += octave_offset
+                n = ch
+                c_log("Found note: " + n)
+                i += 1
+                m = "!" # This is hack :D Well, micropython is stubborn and keeps the value if trying to set it to empty string.
+                if i < len(mml) and mml[i] in "+#-":
+                    m = mml[i]; i += 1
+                    c_log("Found note modifier: "+ m)
+                chord_freqs.append(get_note_freq(n, m, octave))
 
-            current_octave = max(0, min(7, current_octave))
-            print("note_to_find: "+str(note_to_find))
-            freq = FREQ_TABLE[note_to_find][current_octave]
-            dur = (60000 / tempo * 4 / current_note_dur)
-            add_event(freq, vol, wave, dur)
+            curr_len = length
+            if i < len(mml) and mml[i].isdigit():
+                num = ""
+                while i < len(mml) and mml[i].isdigit():
+                    num += mml[i]; i += 1
+                c_log("Found rhythmic value of "+num)
+                curr_len = int(num)
+            
+            dur = (60000 / tempo * 4 / curr_len)
+            num_ticks = max(1, round((dur / 1000) * TICK_RATE))
+            for _ in range(num_ticks):
+                ticks.append((chord_freqs, vol / 64.0, wave))
             continue
 
         elif ch == "r":
             i += 1
-            current_rest_dur = length
+            curr_len = length
             if i < len(mml) and mml[i].isdigit():
-                num_str = ""
+                num = ""
                 while i < len(mml) and mml[i].isdigit():
-                    num_str += mml[i]
-                    i += 1
-                current_rest_dur = int(num_str)
-            
-            dur = (60000 / tempo * 4 / current_rest_dur)
-            add_event(0, 0, wave, dur)
-            continue
-
+                    num += mml[i]; i += 1
+                curr_len = int(num)
+            dur = (60000 / tempo * 4 / curr_len)
+            for _ in range(max(1, round((dur / 1000) * TICK_RATE))):
+                ticks.append(([0], 0, wave))
         elif ch == "t":
-            i += 1; n = ""
+            i += 1; n = ""; 
             while i < len(mml) and mml[i].isdigit(): n += mml[i]; i += 1
             if n: tempo = int(n)
         elif ch == "v":
-            i += 1; n = ""
+            i += 1; n = ""; 
             while i < len(mml) and mml[i].isdigit(): n += mml[i]; i += 1
             if n: vol = int(n)
-        elif ch == "@":
-            i += 1; n = ""
-            while i < len(mml) and mml[i].isdigit(): n += mml[i]; i += 1
-            if n: wave = int(n)
         elif ch == "o":
             i += 1
-            if i < len(mml) and mml[i].isdigit():
-                octave = int(mml[i]); i += 1
+            if i < len(mml) and mml[i].isdigit(): octave = int(mml[i]); i += 1
         elif ch == "<": octave -= 1; i += 1
         elif ch == ">": octave += 1; i += 1
         elif ch == "l":
-            i += 1; n = ""
+            i += 1; n = ""; 
             while i < len(mml) and mml[i].isdigit(): n += mml[i]; i += 1
             if n: length = int(n)
+        elif ch == "@":
+            i += 1; n = ""; 
+            while i < len(mml) and mml[i].isdigit(): n += mml[i]; i += 1
+            if n: wave = int(n)
         else:
             i += 1
-            
     return ticks
 
 # arpeggio playback
@@ -244,8 +244,8 @@ def play_arp(tracks_mml):
 tracks = [
     "t120 @0 o5 c#4 c4 e4 g4",
     #"t120 @0 o4 [ceg]4 [dfa]4",
-    "t120 @0 o3 c4 r4 a4 g4",  # Prosty bas
-    #"t120 @0 o5 v16 [egb]4. [dfa]8"
+    #"t120 @0 o3 c4 r4 a4 g4",  # Prosty bas
+    "t120 @0 o5 [egb]4 [dfa]4"
 ]
 
 play_arp(tracks)
