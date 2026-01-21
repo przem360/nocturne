@@ -1,8 +1,0 @@
-# TITLE      : Some Title
-# COMPOSER   : Author
-# DATE       : 14th June 2018
-# NOTES      : Computer music of the far future... 8 minutes of
-#              gratuitous 1-bit wankery.
-
-track1 = t180 @0 o5 c#4 c4 e4 g4
-track2 = t180 @0 o5 [egb]4 [dfa]4
